@@ -19,5 +19,5 @@
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/yourusername/sophosguard.git
+   git clone https://github.com/Jurgens92/SophosGuard.git
    cd sophosguard
