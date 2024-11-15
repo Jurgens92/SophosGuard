@@ -13,7 +13,7 @@
 
 ## Current Status
 
-- **Beta Version**: This application is currently in beta. Features may change, and feedback is welcome!
+- **Early Version**: This application is currently working. Features may change, and feedback is welcome!
 
 ## Usage
 
