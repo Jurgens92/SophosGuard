@@ -449,26 +449,27 @@ namespace SophosGuard
 
         private string CreateIPListXml(List<string> ipAddresses, bool isFirstBatch)
         {
-            var ipListXml = string.Join("\n", ipAddresses.Select(ip => $"<IPAddress>{ip}</IPAddress>"));
-
+            var ipListString = string.Join(",", ipAddresses);
             return $@"<?xml version=""1.0"" encoding=""UTF-8""?>
-        <Request>
-            <Login>
-                <Username>{_config.Username}</Username>
-                <Password>{_config.Password}</Password>
-            </Login>
-            <Set>
-                <IPHostGroup>
-                    <Name>IPThreatList</Name>
-                    <Description>Malicious IPs from IPThreat.net</Description>
-                    <IPFamily>IPv4</IPFamily>
-                    <HostList>
-                        {ipListXml}
-                    </HostList>
-                </IPHostGroup>
-            </Set>
-        </Request>";
+<Request>
+    <Login>
+        <Username>{_config.Username}</Username>
+        <Password>{_config.Password}</Password>
+    </Login>
+    <Set>     
+        <IPHost>
+        <Name>IPThreatList</Name>
+        <IPFamily>IPv4</IPFamily>
+        <HostType>IPList</HostType>        
+        <ListOfIPAddresses>{ipListString}</ListOfIPAddresses>  
+    </IPHost>     
+    </Set>
+</Request>";
         }
+        //{ipListString}
+
+
+
 
         private string CreateFirewallRuleXml()
         {
