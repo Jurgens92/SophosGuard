@@ -397,6 +397,15 @@ namespace SophosGuard
                     return;
                 }
 
+                // Split IPs into chunks of 1000
+                var ipChunks = new List<List<string>>();
+                for (int i = 0; i < allIPs.Count; i += 1000)
+                {
+                    ipChunks.Add(allIPs.Skip(i).Take(1000).ToList());
+                }
+
+                LogMessage($"Split {allIPs.Count} IPs into {ipChunks.Count} chunks");
+
                 var handler = new HttpClientHandler
                 {
                     ServerCertificateCustomValidationCallback = (message, cert, chain, sslPolicyErrors) => true
@@ -407,36 +416,72 @@ namespace SophosGuard
                     client.Timeout = TimeSpan.FromMinutes(5);
                     var apiUrl = $"https://{_config.FirewallUrl}:4444/webconsole/APIController";
 
-                    // First create the IP list
-                    ipListStatusLabel.Text = "Status: Creating IP list...";
-                    var ipListXml = CreateIPListXml(allIPs, true);
-                    var ipListResponse = await SendSophosRequest(client, apiUrl, ipListXml);
-
-                    if (!ipListResponse.IsSuccessStatusCode)
+                    // Create/Update IP lists for each chunk
+                    for (int i = 0; i < ipChunks.Count; i++)
                     {
-                        throw new Exception($"Failed to create IP list: {await ipListResponse.Content.ReadAsStringAsync()}");
+                        var listName = $"IPThreatList_{i}";
+                        ipListStatusLabel.Text = $"Status: Processing IP list {i + 1} of {ipChunks.Count}...";
+
+                        try
+                        {
+                            var ipListXml = CreateIPListXml(ipChunks[i], listName);
+                            LogMessage($"Sending IP List request for {listName} ({ipChunks[i].Count} IPs)");
+
+                            var ipListResponse = await SendSophosRequest(client, apiUrl, ipListXml);
+                            var ipListContent = await ipListResponse.Content.ReadAsStringAsync();
+
+                            if (!ipListResponse.IsSuccessStatusCode)
+                            {
+                                throw new Exception($"Failed to create/update IP list {listName}: {ipListContent}");
+                            }
+
+                            LogMessage($"IP List {listName} processed successfully");
+                        }
+                        catch (Exception ex)
+                        {
+                            throw new Exception($"IP List operation failed for chunk {i}: {ex.Message}", ex);
+                        }
                     }
 
-                    // Then create the firewall rule
-                    ipListStatusLabel.Text = "Status: Creating firewall rule...";
-                    var ruleXml = CreateFirewallRuleXml();
-                    var ruleResponse = await SendSophosRequest(client, apiUrl, ruleXml);
-
-                    if (!ruleResponse.IsSuccessStatusCode)
+                    // Create or update firewall rule to include all IP lists
+                    try
                     {
-                        throw new Exception($"Failed to create firewall rule: {await ruleResponse.Content.ReadAsStringAsync()}");
+                        ipListStatusLabel.Text = "Status: Creating/Updating firewall rule...";
+                        var ruleXml = CreateFirewallRuleXml(ipChunks.Count);
+                        LogMessage("Sending Firewall Rule request");
+
+                        var ruleResponse = await SendSophosRequest(client, apiUrl, ruleXml);
+                        var ruleContent = await ruleResponse.Content.ReadAsStringAsync();
+
+                        if (!ruleResponse.IsSuccessStatusCode)
+                        {
+                            throw new Exception($"Failed to create/update firewall rule: {ruleContent}");
+                        }
+
+                        LogMessage("Firewall Rule processed successfully");
+                    }
+                    catch (Exception ex)
+                    {
+                        throw new Exception($"Firewall Rule operation failed: {ex.Message}", ex);
                     }
 
+                    // Update status and notify user
                     lastSyncLabel.Text = $"Last Sync: {DateTime.Now:yyyy-MM-dd HH:mm:ss}";
-                    MessageBox.Show($"Successfully applied {allIPs.Count} IP addresses and created firewall rule!",
-                        "Success", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    var successMessage = $"Successfully processed {allIPs.Count:N0} IP addresses across {ipChunks.Count} lists";
+
+                    MessageBox.Show(successMessage, "Success", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    LogMessage(successMessage);
                 }
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Error applying to firewall: {ex.Message}",
-                    "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                LogMessage($"Error applying to Sophos: {ex.Message}");
+                var errorMessage = $"Error applying to firewall: {ex.Message}";
+                MessageBox.Show(errorMessage, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                LogMessage($"Error in ApplyToSophos: {ex.Message}");
+                if (ex.InnerException != null)
+                {
+                    LogMessage($"Inner Exception: {ex.InnerException.Message}");
+                }
             }
             finally
             {
@@ -447,7 +492,7 @@ namespace SophosGuard
             }
         }
 
-        private string CreateIPListXml(List<string> ipAddresses, bool isFirstBatch)
+        private string CreateIPListXml(List<string> ipAddresses, string listName)
         {
             var ipListString = string.Join(",", ipAddresses);
             return $@"<?xml version=""1.0"" encoding=""UTF-8""?>
@@ -458,7 +503,7 @@ namespace SophosGuard
     </Login>
     <Set>     
         <IPHost>
-        <Name>IPThreatList</Name>
+        <Name>{listName}</Name>
         <IPFamily>IPv4</IPFamily>
         <HostType>IPList</HostType>        
         <ListOfIPAddresses>{ipListString}</ListOfIPAddresses>  
@@ -471,34 +516,39 @@ namespace SophosGuard
 
 
 
-        private string CreateFirewallRuleXml()
+        private string CreateFirewallRuleXml(int listCount)
         {
+            // Build the source networks section with all IP lists
+            var sourceNetworksXml = string.Join(Environment.NewLine,
+                Enumerable.Range(0, listCount)
+                    .Select(i => $"<Network>IPThreatList_{i}</Network>"));
+
             return $@"<?xml version=""1.0"" encoding=""UTF-8""?>
-        <Request>
-            <Login>
-                <Username>{_config.Username}</Username>
-                <Password>{_config.Password}</Password>
-            </Login>
-            <Set>
-                <FirewallRule transactionid="""">
-                    <Name>Block_IPThreat_List</Name>
-                    <Description>Block known malicious IPs from IPThreat.net</Description>
-                    <IPFamily>IPv4</IPFamily>
-                    <Status>Enable</Status>
-                    <Position>Top</Position>
-                    <PolicyType>Network</PolicyType>
-                    <NetworkPolicy>
-                        <Action>Drop</Action>
-                        <LogTraffic>Enable</LogTraffic>
-                        <SkipLocalDestined>Disable</SkipLocalDestined>
-                        <Schedule>All The Time</Schedule>
-                        <SourceNetworks>
-                            <Network>IPThreatList</Network>
-                        </SourceNetworks>
-                    </NetworkPolicy>
-                </FirewallRule>
-            </Set>
-        </Request>";
+<Request>
+    <Login>
+        <Username>{_config.Username}</Username>
+        <Password>{_config.Password}</Password>
+    </Login>
+    <Set>
+        <FirewallRule transactionid="""">
+            <Name>Block_IPThreat_List</Name>
+            <Description>Block known malicious IPs from IPThreat.net</Description>
+            <IPFamily>IPv4</IPFamily>
+            <Status>Enable</Status>
+            <Position>Top</Position>
+            <PolicyType>Network</PolicyType>
+            <NetworkPolicy>
+                <Action>Drop</Action>
+                <LogTraffic>Enable</LogTraffic>
+                <SkipLocalDestined>Disable</SkipLocalDestined>
+                <Schedule>All The Time</Schedule>
+                <SourceNetworks>
+                    {sourceNetworksXml}
+                </SourceNetworks>
+            </NetworkPolicy>
+        </FirewallRule>
+    </Set>
+</Request>";
         }
 
 
