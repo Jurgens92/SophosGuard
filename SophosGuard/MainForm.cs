@@ -378,7 +378,6 @@ namespace SophosGuard
         //sophos
         private async void ApplyToSophos(object sender, EventArgs e)
         {
-            const int BATCH_SIZE = 500; // Adjust this number based on testing
             applySophosButton.Enabled = false;
             applySophosButton.Text = "Applying to Firewall...";
             progressBar.Visible = true;
@@ -408,41 +407,28 @@ namespace SophosGuard
                     client.Timeout = TimeSpan.FromMinutes(5);
                     var apiUrl = $"https://{_config.FirewallUrl}:4444/webconsole/APIController";
 
-                    // Process IPs in batches
-                    var totalBatches = (int)Math.Ceiling(allIPs.Count / (double)BATCH_SIZE);
-                    for (int i = 0; i < totalBatches; i++)
+                    // First create the IP list
+                    ipListStatusLabel.Text = "Status: Creating IP list...";
+                    var ipListXml = CreateIPListXml(allIPs, true);
+                    var ipListResponse = await SendSophosRequest(client, apiUrl, ipListXml);
+
+                    if (!ipListResponse.IsSuccessStatusCode)
                     {
-                        var batchIPs = allIPs.Skip(i * BATCH_SIZE).Take(BATCH_SIZE).ToList();
-                        ipListStatusLabel.Text = $"Status: Processing batch {i + 1} of {totalBatches} ({batchIPs.Count} IPs)...";
-                        Application.DoEvents(); // Allow UI to update
-
-                        // Create or update the IP list for this batch
-                        var ipListXml = CreateIPListXml(batchIPs, i == 0);
-                        var ipListResponse = await SendSophosRequest(client, apiUrl, ipListXml);
-
-                        if (!ipListResponse.IsSuccessStatusCode)
-                        {
-                            throw new Exception($"Failed to update IP list batch {i + 1}: {await ipListResponse.Content.ReadAsStringAsync()}");
-                        }
-
-                        // Add delay between batches to prevent overload
-                        if (i < totalBatches - 1)
-                        {
-                            await Task.Delay(1000); // 1 second delay between batches
-                        }
+                        throw new Exception($"Failed to create IP list: {await ipListResponse.Content.ReadAsStringAsync()}");
                     }
 
-                    // Create or update the firewall rule
+                    // Then create the firewall rule
+                    ipListStatusLabel.Text = "Status: Creating firewall rule...";
                     var ruleXml = CreateFirewallRuleXml();
                     var ruleResponse = await SendSophosRequest(client, apiUrl, ruleXml);
 
                     if (!ruleResponse.IsSuccessStatusCode)
                     {
-                        throw new Exception($"Failed to update firewall rule: {await ruleResponse.Content.ReadAsStringAsync()}");
+                        throw new Exception($"Failed to create firewall rule: {await ruleResponse.Content.ReadAsStringAsync()}");
                     }
 
                     lastSyncLabel.Text = $"Last Sync: {DateTime.Now:yyyy-MM-dd HH:mm:ss}";
-                    MessageBox.Show($"Successfully applied {allIPs.Count} IP addresses to the firewall!",
+                    MessageBox.Show($"Successfully applied {allIPs.Count} IP addresses and created firewall rule!",
                         "Success", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 }
             }
@@ -471,10 +457,10 @@ namespace SophosGuard
                 <Username>{_config.Username}</Username>
                 <Password>{_config.Password}</Password>
             </Login>
-            <Set operation=""{(isFirstBatch ? "update" : "append")}"">
+            <Set>
                 <IPHostGroup>
                     <Name>IPThreatList</Name>
-                    <Description>Malicious IPs from IPThreat.net (Updated: {DateTime.Now:yyyy-MM-dd HH:mm})</Description>
+                    <Description>Malicious IPs from IPThreat.net</Description>
                     <IPFamily>IPv4</IPFamily>
                     <HostList>
                         {ipListXml}
@@ -492,20 +478,23 @@ namespace SophosGuard
                 <Username>{_config.Username}</Username>
                 <Password>{_config.Password}</Password>
             </Login>
-            <Set operation=""update"">
-                <FirewallRule>
+            <Set>
+                <FirewallRule transactionid="""">
                     <Name>Block_IPThreat_List</Name>
-                    <Description>Block known malicious IPs from IPThreat.net (Updated: {DateTime.Now:yyyy-MM-dd HH:mm})</Description>
-                    <Status>1</Status>
+                    <Description>Block known malicious IPs from IPThreat.net</Description>
                     <IPFamily>IPv4</IPFamily>
-                    <Position>1</Position>
-                    <SourceZones>WAN</SourceZones>
-                    <DestinationZones>LAN</DestinationZones>
-                    <Action>Drop</Action>
-                    <LogTraffic>1</LogTraffic>
-                    <SkipLocalTraffic>1</SkipLocalTraffic>
-                    <Schedule>All_The_Time</Schedule>
-                    <SourceNetworks>IPThreatList</SourceNetworks>
+                    <Status>Enable</Status>
+                    <Position>Top</Position>
+                    <PolicyType>Network</PolicyType>
+                    <NetworkPolicy>
+                        <Action>Drop</Action>
+                        <LogTraffic>Enable</LogTraffic>
+                        <SkipLocalDestined>Disable</SkipLocalDestined>
+                        <Schedule>All The Time</Schedule>
+                        <SourceNetworks>
+                            <Network>IPThreatList</Network>
+                        </SourceNetworks>
+                    </NetworkPolicy>
                 </FirewallRule>
             </Set>
         </Request>";
@@ -528,6 +517,13 @@ namespace SophosGuard
                 if (responseContent.Contains("Authentication Failure"))
                 {
                     throw new Exception("Authentication failed. Please check your credentials.");
+                }
+
+                // Check for other potential errors in the response
+                if (responseContent.Contains("<Status>Failure</Status>") ||
+                    responseContent.Contains("<Error>"))
+                {
+                    throw new Exception($"Sophos API Error: {responseContent}");
                 }
 
                 return response;
