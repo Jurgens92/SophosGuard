@@ -22,6 +22,7 @@ namespace SophosGuard
         private readonly TabPage serviceTab;
         private readonly TabPage configTab;
         private readonly TabPage logsTab;
+        private readonly TabPage ipListTab;
 
         // Service tab controls
         private readonly Label serviceStatusLabel;
@@ -39,16 +40,10 @@ namespace SophosGuard
         private readonly Button testConnectionButton;
 
         // Logs tab controls
-        private readonly RichTextBox logViewerTextBox;
-        private readonly Button refreshLogsButton;
+        private RichTextBox logViewerTextBox; // Removed readonly
+        private Button refreshLogsButton; // Removed readonly
 
-        // State
-        private bool _isAdmin;
-        private Configuration _config;
-        private readonly HttpClient _httpClient;
-
-        // IPThreat List
-        private readonly TabPage ipListTab;
+        // IPThreat List controls
         private readonly DataGridView ipListGridView;
         private readonly Button refreshIpListButton;
         private readonly Label ipListStatusLabel;
@@ -57,6 +52,11 @@ namespace SophosGuard
         private readonly Label lastSyncLabel;
         private readonly ComboBox threatListComboBox;
         private readonly Label threatListLabel;
+
+        // State
+        private bool _isAdmin;
+        private Configuration _config;
+        private readonly HttpClient _httpClient;
 
         public MainForm()
         {
@@ -107,8 +107,24 @@ namespace SophosGuard
                 testConnectionButton = new Button();
 
                 // Logs tab controls
-                logViewerTextBox = new RichTextBox();
-                refreshLogsButton = new Button();
+                logViewerTextBox = new RichTextBox
+                {
+                    Dock = DockStyle.Fill,
+                    ReadOnly = true,
+                    BackColor = Color.White,
+                    Font = new Font("Consolas", 9.75F, FontStyle.Regular),
+                    HideSelection = false,
+                    Margin = new Padding(0, 5, 0, 5)
+                };
+
+                refreshLogsButton = new Button
+                {
+                    Text = "Refresh Logs",
+                    Width = 120,
+                    Height = 30,
+                    Margin = new Padding(0, 0, 10, 0)
+                };
+                refreshLogsButton.Click += RefreshLogs;
 
                 // IP List tab controls
                 ipListGridView = new DataGridView
@@ -223,8 +239,33 @@ namespace SophosGuard
             new ThreatListItem(25, "Threat Level 25 (Large)"),
             new ThreatListItem(0, "Threat Level 0 (Largest, Complete List)")
             });
-            threatListComboBox.SelectedIndex = 0;  // Default to smallest list
+            //threatListComboBox.SelectedIndex = 0;  // Default to smallest list
             panel.Controls.Add(threatListComboBox, 1, 0);
+
+
+            // Select the configured threat level
+            bool foundMatch = false;
+            foreach (ThreatListItem item in threatListComboBox.Items)
+            {
+                if (item.Level == _config.ThreatLevel)
+                {
+                    threatListComboBox.SelectedItem = item;
+                    foundMatch = true;
+                    break;
+                }
+            }
+            // If no matching threat level was found, default to 100
+            if (!foundMatch)
+            {
+                foreach (ThreatListItem item in threatListComboBox.Items)
+                {
+                    if (item.Level == 100)
+                    {
+                        threatListComboBox.SelectedItem = item;
+                        break;
+                    }
+                }
+            }
 
             // Add status label
             ipListStatusLabel.Dock = DockStyle.Fill;
@@ -915,34 +956,207 @@ namespace SophosGuard
             var panel = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
-                ColumnCount = 2,
-                RowCount = 6,
+                ColumnCount = 1,
+                RowCount = 3,
                 Padding = new Padding(10)
             };
 
-            logViewerTextBox.Dock = DockStyle.Fill;
-            logViewerTextBox.ReadOnly = true;
-            logViewerTextBox.BackColor = Color.White;
-            logViewerTextBox.Font = new Font("Consolas", 9.75F, FontStyle.Regular);
-            panel.Controls.Add(logViewerTextBox, 0, 0);
+            // Configure row styles
+            panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 40F));  // Controls row
+            panel.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));  // Log viewer row
+            panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 40F));  // Status row
 
-            refreshLogsButton.Text = "Refresh Logs";
+            // Create controls panel
+            var controlsPanel = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                FlowDirection = FlowDirection.LeftToRight,
+                AutoSize = true,
+                Margin = new Padding(0, 0, 0, 5)
+            };
+
+            // Configure refresh button
+            refreshLogsButton = new Button
+            {
+                Text = "Refresh Logs",
+                Width = 120,
+                Height = 30,
+                Margin = new Padding(0, 0, 10, 0)
+            };
             refreshLogsButton.Click += RefreshLogs;
-            panel.Controls.Add(refreshLogsButton, 0, 1);
 
+            // Add auto-refresh checkbox
+            var autoRefreshCheckBox = new CheckBox
+            {
+                Text = "Auto-refresh (30s)",
+                AutoSize = true,
+                Checked = true,
+                Margin = new Padding(0, 5, 10, 0)
+            };
+
+            // Create clear logs button
+            var clearLogsButton = new Button
+            {
+                Text = "Clear Display",
+                Width = 120,
+                Height = 30
+            };
+            clearLogsButton.Click += (s, e) => logViewerTextBox.Clear();
+
+            // Add date picker for log selection
+            var datePicker = new DateTimePicker
+            {
+                Format = DateTimePickerFormat.Short,
+                Width = 120,
+                Value = DateTime.Today
+            };
+            datePicker.ValueChanged += (s, e) => LoadLogsForDate(datePicker.Value);
+
+            controlsPanel.Controls.AddRange(new Control[]
+            {
+        refreshLogsButton,
+        autoRefreshCheckBox,
+        clearLogsButton,
+        new Label { Text = "Select Date:", AutoSize = true, Margin = new Padding(10, 5, 5, 0) },
+        datePicker
+            });
+
+            // Configure log viewer
+            logViewerTextBox = new RichTextBox
+            {
+                Dock = DockStyle.Fill,
+                ReadOnly = true,
+                BackColor = Color.White,
+                Font = new Font("Consolas", 9.75F, FontStyle.Regular),
+                HideSelection = false,
+                Margin = new Padding(0, 5, 0, 5)
+            };
+
+            // Add context menu to log viewer
+            var contextMenu = new ContextMenuStrip();
+            var copyMenuItem = new ToolStripMenuItem("Copy Selected");
+            copyMenuItem.Click += (s, e) =>
+            {
+                if (logViewerTextBox.SelectionLength > 0)
+                {
+                    Clipboard.SetText(logViewerTextBox.SelectedText);
+                }
+            };
+            var selectAllMenuItem = new ToolStripMenuItem("Select All");
+            selectAllMenuItem.Click += (s, e) => logViewerTextBox.SelectAll();
+            contextMenu.Items.AddRange(new ToolStripItem[] { copyMenuItem, selectAllMenuItem });
+            logViewerTextBox.ContextMenuStrip = contextMenu;
+
+            // Create status label
+            var statusLabel = new Label
+            {
+                Dock = DockStyle.Fill,
+                AutoSize = true,
+                Text = "Ready"
+            };
+
+            // Add controls to panel
+            panel.Controls.Add(controlsPanel, 0, 0);
+            panel.Controls.Add(logViewerTextBox, 0, 1);
+            panel.Controls.Add(statusLabel, 0, 2);
+
+            // Add the panel to the logs tab
             logsTab.Controls.Add(panel);
-            
+
+            // Setup auto-refresh timer
+            var refreshTimer = new System.Windows.Forms.Timer
+            {
+                Interval = 30000 // 30 seconds
+            };
+            refreshTimer.Tick += (s, e) =>
+            {
+                if (autoRefreshCheckBox.Checked && tabControl.SelectedTab == logsTab)
+                {
+                    RefreshLogs(s, e);
+                }
+            };
+            refreshTimer.Start();
+
+            // Initial load
+            LoadLogsForDate(DateTime.Today);
         }
+
+        private void LoadLogsForDate(DateTime date)
+        {
+            try
+            {
+                string logPath = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                    "SophosGuard",
+                    "Logs",
+                    $"sophosguard-{date:yyyy-MM-dd}.log"
+                );
+
+                if (File.Exists(logPath))
+                {
+                    var logText = File.ReadAllText(logPath);
+                    UpdateLogDisplay(logText);
+                }
+                else
+                {
+                    logViewerTextBox.Text = $"No logs found for {date:yyyy-MM-dd}.";
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error loading logs: {ex.Message}",
+                    "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+
 
         private void LoadInitialData()
         {
             try
             {
+                // Load configuration
+                _config = ConfigurationManager.LoadConfiguration();
+
+                // Update UI with loaded configuration
+                firewallUrlTextBox.Text = _config.FirewallUrl;
+                usernameTextBox.Text = _config.Username;
+                passwordTextBox.Text = _config.Password;
+                updateIntervalNumeric.Value = _config.UpdateIntervalMinutes;
+
+                // Set the threat level in the combo box
+                foreach (ThreatListItem item in threatListComboBox.Items)
+                {
+                    if (item.Level == _config.ThreatLevel)
+                    {
+                        threatListComboBox.SelectedItem = item;
+                        break;
+                    }
+                }
+
+                // If no matching threat level was found, select the default (100)
+                if (threatListComboBox.SelectedItem == null)
+                {
+                    foreach (ThreatListItem item in threatListComboBox.Items)
+                    {
+                        if (item.Level == 100)
+                        {
+                            threatListComboBox.SelectedItem = item;
+                            break;
+                        }
+                    }
+                }
+
                 RefreshLogs(this, EventArgs.Empty);
+                LoadLocalIPList();
+
+                LogMessage($"Configuration loaded with threat level {_config.ThreatLevel}");
             }
             catch (Exception ex)
             {
                 LogMessage($"Error loading initial data: {ex.Message}");
+                MessageBox.Show($"Error loading configuration: {ex.Message}",
+                    "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
@@ -1105,19 +1319,34 @@ namespace SophosGuard
         {
             try
             {
+                // Get the selected threat level from the combobox
+                var selectedItem = threatListComboBox.SelectedItem as ThreatListItem;
+                if (selectedItem == null)
+                {
+                    throw new Exception("No threat level selected");
+                }
+
+                // Update configuration
                 _config.FirewallUrl = firewallUrlTextBox.Text;
                 _config.Username = usernameTextBox.Text;
                 _config.Password = passwordTextBox.Text;
                 _config.UpdateIntervalMinutes = (int)updateIntervalNumeric.Value;
+                _config.ThreatLevel = selectedItem.Level;  // Save the threat level
 
+                // Save to disk
                 ConfigurationManager.SaveConfiguration(_config);
-                MessageBox.Show("Configuration saved successfully.",
+
+                // Display success message with threat level info
+                MessageBox.Show($"Configuration saved successfully.\nThreat Level: {selectedItem.Level}",
                     "Success", MessageBoxButtons.OK, MessageBoxIcon.Information);
+
+                LogMessage($"Configuration saved with threat level {selectedItem.Level}");
             }
             catch (Exception ex)
             {
                 MessageBox.Show($"Error saving configuration: {ex.Message}",
                     "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                LogMessage($"Error saving configuration: {ex.Message}");
             }
         }
 
@@ -1134,20 +1363,70 @@ namespace SophosGuard
 
                 if (File.Exists(logPath))
                 {
-                    logViewerTextBox.Text = File.ReadAllText(logPath);
-                    logViewerTextBox.SelectionStart = logViewerTextBox.Text.Length;
-                    logViewerTextBox.ScrollToCaret();
-                }
-                else
-                {
-                    logViewerTextBox.Text = "No logs found for today.";
+                    var logText = File.ReadAllText(logPath);
+                    UpdateLogDisplay(logText);
                 }
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Error loading logs: {ex.Message}",
+                MessageBox.Show($"Error refreshing logs: {ex.Message}",
                     "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
+        }
+
+        private void UpdateLogDisplay(string logText)
+        {
+            // Save the current selection and scroll position
+            int selectionStart = logViewerTextBox.SelectionStart;
+            int selectionLength = logViewerTextBox.SelectionLength;
+            bool wasAtBottom = logViewerTextBox.SelectionStart == logViewerTextBox.TextLength;
+
+            logViewerTextBox.SuspendLayout();
+            logViewerTextBox.Clear();
+
+            // Process and color code the log entries
+            foreach (var line in logText.Split(new[] { Environment.NewLine }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                // Parse the line
+                int currentPosition = logViewerTextBox.TextLength;
+                logViewerTextBox.AppendText(line + Environment.NewLine);
+
+                // Color code based on log level
+                if (line.Contains(" - ERROR -"))
+                {
+                    logViewerTextBox.Select(currentPosition, line.Length);
+                    logViewerTextBox.SelectionColor = Color.Red;
+                }
+                else if (line.Contains(" - WARNING -"))
+                {
+                    logViewerTextBox.Select(currentPosition, line.Length);
+                    logViewerTextBox.SelectionColor = Color.Orange;
+                }
+                else if (line.Contains(" - SUCCESS -"))
+                {
+                    logViewerTextBox.Select(currentPosition, line.Length);
+                    logViewerTextBox.SelectionColor = Color.Green;
+                }
+                else
+                {
+                    logViewerTextBox.Select(currentPosition, line.Length);
+                    logViewerTextBox.SelectionColor = Color.Black;
+                }
+            }
+
+            // Restore selection if it wasn't at the bottom
+            if (!wasAtBottom && selectionLength > 0)
+            {
+                logViewerTextBox.Select(selectionStart, selectionLength);
+            }
+            else
+            {
+                // Scroll to bottom for new entries
+                logViewerTextBox.Select(logViewerTextBox.TextLength, 0);
+                logViewerTextBox.ScrollToCaret();
+            }
+
+            logViewerTextBox.ResumeLayout();
         }
 
         private void UpdateServiceStatus()

@@ -161,6 +161,7 @@
     <Compile Include="SophosGuardService.cs">
       <SubType>Component</SubType>
     </Compile>
+    <Compile Include="SophosGuardWorker.cs" />
     <EmbeddedResource Include="Properties\Resources.resx">
       <Generator>ResXFileCodeGenerator</Generator>
       <LastGenOutput>Resources.Designer.cs</LastGenOutput>

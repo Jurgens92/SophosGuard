@@ -1,5 +1,6 @@
 ﻿using System;
 using System.IO;
+using System.Linq;
 using Newtonsoft.Json;
 
 namespace SophosGuard
@@ -33,6 +34,11 @@ namespace SophosGuard
         public string ServiceDisplayName { get; set; } = "SophosGuard IP Threat Protection";
         public string ServiceDescription { get; set; } = "Manages IP threat lists for Sophos XGS Firewall";
 
+        // IP Threat List Settings
+        public int ThreatLevel { get; set; } = 100; // Default to highest threat level (smallest, most recent list)
+        public bool EnableMultipleLists { get; set; } = false; // Option to enable multiple threat levels
+        public int[] AdditionalThreatLevels { get; set; } = Array.Empty<int>(); // Additional threat levels to monitor
+
         // Firewall Rule Settings
         public FirewallRule ThreatRule { get; set; } = new FirewallRule();
     }
@@ -54,10 +60,18 @@ namespace SophosGuard
                     string json = File.ReadAllText(ConfigFilePath);
                     var config = JsonConvert.DeserializeObject<Configuration>(json);
 
-                    // If we're loading an old configuration format, migrate it
-                    if (config.ThreatRule == null)
+                    // Validate threat levels
+                    if (config.ThreatLevel < 0 || config.ThreatLevel > 100)
                     {
-                        config.ThreatRule = new FirewallRule();
+                        config.ThreatLevel = 100; // Reset to default if invalid
+                    }
+
+                    if (config.EnableMultipleLists)
+                    {
+                        config.AdditionalThreatLevels = config.AdditionalThreatLevels
+                            .Where(level => level >= 0 && level <= 100)
+                            .Distinct()
+                            .ToArray();
                     }
 
                     return config ?? new Configuration();

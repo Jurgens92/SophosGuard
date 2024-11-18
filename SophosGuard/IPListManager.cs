@@ -40,19 +40,26 @@ namespace SophosGuard
             _semaphore = new SemaphoreSlim(1, 1); // Ensure thread-safe operations
         }
 
-        public async Task<List<string>> FetchIPThreatList(CancellationToken cancellationToken = default)
+        public async Task<List<string>> FetchIPThreatList(int threatLevel, CancellationToken cancellationToken = default)
         {
             try
             {
                 await _semaphore.WaitAsync(cancellationToken);
 
-                using (var response = await _httpClient.GetAsync("https://lists.ipthreat.net/file/ipthreat-lists/threat/threat-0.txt",
-                    HttpCompletionOption.ResponseHeadersRead, // Don't wait for full content before processing
+                // Validate threat level
+                if (threatLevel < 0 || threatLevel > 100)
+                {
+                    throw new ArgumentException("Threat level must be between 0 and 100");
+                }
+
+                using (var response = await _httpClient.GetAsync(
+                    $"https://lists.ipthreat.net/file/ipthreat-lists/threat/threat-{threatLevel}.txt",
+                    HttpCompletionOption.ResponseHeadersRead,
                     cancellationToken))
                 {
                     response.EnsureSuccessStatusCode();
 
-                    var ipAddresses = new HashSet<string>(StringComparer.OrdinalIgnoreCase); // Use HashSet for deduplication
+                    var ipAddresses = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
                     using (var stream = await response.Content.ReadAsStreamAsync())
                     using (var reader = new StreamReader(stream))
@@ -64,20 +71,17 @@ namespace SophosGuard
                             processedLines++;
                             if (processedLines % 1000 == 0)
                             {
-                                await Task.Yield(); // Prevent UI blocking
+                                await Task.Yield();
                             }
 
-                            // Skip comments and empty lines
                             if (string.IsNullOrWhiteSpace(line) || line.StartsWith("#"))
                                 continue;
 
-                            // Extract IP address (everything before the #)
                             var ipPart = line.Split('#')[0].Trim();
 
                             if (string.IsNullOrWhiteSpace(ipPart))
                                 continue;
 
-                            // Handle IP ranges
                             if (ipPart.Contains("-"))
                             {
                                 var range = ipPart.Split('-');
@@ -104,22 +108,43 @@ namespace SophosGuard
             }
             catch (OperationCanceledException)
             {
-                throw; // Propagate cancellation
+                throw;
             }
             catch (HttpRequestException ex)
             {
-                LogError($"HTTP request failed: {ex.Message}");
+                LogError($"HTTP request failed for threat level {threatLevel}: {ex.Message}");
                 throw;
             }
             catch (Exception ex)
             {
-                LogError($"Error fetching IP threat list: {ex.Message}");
+                LogError($"Error fetching IP threat list level {threatLevel}: {ex.Message}");
                 throw;
             }
             finally
             {
                 _semaphore.Release();
             }
+        }
+
+        public async Task<Dictionary<int, List<string>>> FetchMultipleThreatLists(int[] threatLevels, CancellationToken cancellationToken = default)
+        {
+            var result = new Dictionary<int, List<string>>();
+
+            foreach (var level in threatLevels.OrderBy(l => l))
+            {
+                try
+                {
+                    var ips = await FetchIPThreatList(level, cancellationToken);
+                    result.Add(level, ips);
+                }
+                catch (Exception ex)
+                {
+                    LogError($"Failed to fetch threat level {level}: {ex.Message}");
+                    // Continue with other levels even if one fails
+                }
+            }
+
+            return result;
         }
 
         public void SaveIPList(List<string> ipList)
