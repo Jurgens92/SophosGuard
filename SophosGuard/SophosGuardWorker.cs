@@ -17,6 +17,7 @@ namespace SophosGuard
         private readonly SemaphoreSlim _updateLock;
         private const int MAX_RETRIES = 3;
         private const int RETRY_DELAY_SECONDS = 30;
+        private DateTime _lastUpdateTime;
 
         public SophosGuardWorker(IPListManager ipListManager, Configuration config)
         {
@@ -32,37 +33,74 @@ namespace SophosGuard
 
             // Initialize timer but don't start it yet
             _updateTimer = new Timer(async _ => await ExecuteUpdateCycle(), null, Timeout.Infinite, Timeout.Infinite);
+            _lastUpdateTime = DateTime.MinValue;
         }
 
         public void Start()
         {
             if (_isRunning) return;
-            
+
             _isRunning = true;
             LogMessage("Worker service starting");
-            
+
             // Run initial update immediately
-            Task.Run(async () => await ExecuteUpdateCycle());
-            
+            Task.Run(async () =>
+            {
+                try
+                {
+                    await ExecuteUpdateCycle();
+                }
+                catch (Exception ex)
+                {
+                    LogMessage($"Initial update failed: {ex.Message}");
+                }
+            });
+
             // Setup timer for subsequent updates
             var interval = TimeSpan.FromMinutes(_config.UpdateIntervalMinutes);
             _updateTimer.Change(interval, interval);
-            
+
             LogMessage($"Update timer configured for {_config.UpdateIntervalMinutes} minute intervals");
         }
 
         public void Stop()
         {
             if (!_isRunning) return;
-            
+
             _isRunning = false;
             _updateTimer.Change(Timeout.Infinite, Timeout.Infinite);
             LogMessage("Worker service stopped");
         }
 
+        public void UpdateConfiguration(Configuration newConfig)
+        {
+            _config = newConfig;
+            if (_isRunning)
+            {
+                var interval = TimeSpan.FromMinutes(_config.UpdateIntervalMinutes);
+                _updateTimer.Change(interval, interval);
+                LogMessage($"Timer interval updated to {_config.UpdateIntervalMinutes} minutes");
+            }
+        }
+
+
+        public TimeSpan GetTimeSinceLastUpdate()
+        {
+            return DateTime.Now - _lastUpdateTime;
+        }
+
+
+        public void ForceUpdate()
+        {
+            _lastUpdateTime = DateTime.MinValue;
+            Task.Run(async () => await ExecuteUpdateCycle());
+        }
+
+
+
         private async Task ExecuteUpdateCycle()
         {
-            if (!await _updateLock.WaitAsync(0)) // Don't wait if already running
+            if (!await _updateLock.WaitAsync(0))
             {
                 LogMessage("Update cycle already in progress, skipping");
                 return;
@@ -70,9 +108,24 @@ namespace SophosGuard
 
             try
             {
+                var now = DateTime.Now;
+                var timeSinceLastUpdate = now - _lastUpdateTime;
+
+                if (timeSinceLastUpdate.TotalMinutes < _config.UpdateIntervalMinutes)
+                {
+                    LogMessage($"Skipping update as last update was {timeSinceLastUpdate.TotalMinutes:F1} minutes ago");
+                    return;
+                }
+
                 LogMessage("Starting update cycle");
-                
-                // Step 1: Fetch new IP threat list
+
+                // Step 1: Verify Sophos connection
+                if (!await TestSophosConnection())
+                {
+                    throw new Exception("Cannot connect to Sophos Firewall. Please check connection settings.");
+                }
+
+                // Step 2: Fetch new IP threat list
                 var ipList = await FetchIPThreatListWithRetry();
                 if (ipList == null || !ipList.Any())
                 {
@@ -80,24 +133,79 @@ namespace SophosGuard
                     return;
                 }
 
-                // Step 2: Save the updated list
+                // Step 3: Compare with existing list
+                var currentList = _ipListManager.GetCurrentIPList();
+                var newIPs = ipList.Except(currentList.IPAddresses).ToList();
+                var removedIPs = currentList.IPAddresses.Except(ipList).ToList();
+
+                if (!newIPs.Any() && !removedIPs.Any())
+                {
+                    LogMessage("No changes in IP list detected");
+                    _lastUpdateTime = now;
+                    return;
+                }
+
+                LogMessage($"Found {newIPs.Count} new IPs and {removedIPs.Count} IPs to remove");
+
+                // Step 4: Save the updated list
                 _ipListManager.SaveIPList(ipList);
                 LogMessage($"Saved {ipList.Count} IP addresses to local storage");
 
-                // Step 3: Update Sophos Firewall rules
+                // Step 5: Update Sophos Firewall rules
                 await UpdateSophosFirewallWithRetry(ipList);
-                
-                LogMessage("Update cycle completed successfully");
+
+                _lastUpdateTime = now;
+                LogMessage($"Update cycle completed successfully at {now:yyyy-MM-dd HH:mm:ss}");
             }
             catch (Exception ex)
             {
                 LogMessage($"Error in update cycle: {ex.Message}");
+                // Schedule a retry in 5 minutes if this was a failed attempt
+                ScheduleRetry();
             }
             finally
             {
                 _updateLock.Release();
             }
         }
+
+        private async Task<bool> TestSophosConnection()
+        {
+            try
+            {
+                var apiUrl = $"https://{_config.FirewallUrl}:4444/webconsole/APIController";
+                var testXml = $@"<?xml version=""1.0"" encoding=""UTF-8""?>
+<Request>
+    <Login>
+        <Username>{_config.Username}</Username>
+        <Password>{_config.Password}</Password>
+    </Login>
+    <Get>
+        <IPHost></IPHost>
+    </Get>
+</Request>";
+
+                var formContent = new MultipartFormDataContent();
+                formContent.Add(new StringContent(testXml), "reqxml");
+
+                var response = await _httpClient.PostAsync(apiUrl, formContent);
+                var content = await response.Content.ReadAsStringAsync();
+
+                return !content.Contains("Authentication Failure") && response.IsSuccessStatusCode;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private void ScheduleRetry()
+        {
+            const int RETRY_MINUTES = 5;
+            LogMessage($"Scheduling retry in {RETRY_MINUTES} minutes");
+            _updateTimer.Change(TimeSpan.FromMinutes(RETRY_MINUTES), TimeSpan.FromMinutes(_config.UpdateIntervalMinutes));
+        }
+
 
         private async Task<List<string>> FetchIPThreatListWithRetry()
         {
